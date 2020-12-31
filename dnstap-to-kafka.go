@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -10,6 +11,7 @@ import (
 
 	dnstap "github.com/dnstap/golang-dnstap"
 	proto "github.com/golang/protobuf/proto"
+	"github.com/miekg/dns"
 	kafka "github.com/segmentio/kafka-go"
 )
 
@@ -34,10 +36,22 @@ type kafkaOutput struct {
 	ctx           context.Context
 }
 
+type dnsRR struct {
+	Rrname    string
+	Rrtype    uint16
+	Rdata     string
+	Ttl       uint32
+	Timestamp uint64
+}
+
 func newKafkaOutput(brokers []string, topic string, formatter dnstap.TextFormatFunc) *kafkaOutput {
 	kw := kafka.NewWriter(kafka.WriterConfig{
 		Brokers: brokers,
 		Topic:   topic,
+		// RequiredAcks: 0,
+		// BatchSize:    10,
+		// BatchTimeout: 2 * time.Second,
+		Logger: logger,
 	})
 	return &kafkaOutput{
 		kafkaWriter:   kw,
@@ -61,25 +75,51 @@ func (o *kafkaOutput) RunOutputLoop() {
 			o.logger.Printf("kafkaOutput: proto.Unmarshal() failed: %s, returning", err)
 			break
 		}
-		buf, ok := o.format(dt)
-		if !ok {
-			o.logger.Printf("kafkaOutput: text format function failed, returning")
-			break
-		}
-		err := o.kafkaWriter.WriteMessages(o.ctx, kafka.Message{
-			Value: buf,
-		})
-		if err != nil {
-			panic("could not write message " + err.Error())
+		// buf, ok := o.format(dt)
+		// if !ok {
+		// 	o.logger.Printf("kafkaOutput: text format function failed, returning")
+		// 	break
+		// }
+		// s := string(buf)
+		// o.logger.Printf("%s", s)
+		msg := new(dns.Msg)
+		if err := msg.Unpack(dt.Message.ResponseMessage); err != nil {
+			o.logger.Printf("parse failed: %v", err)
 		}
 
+		//o.logger.Printf("%s", msg.String())
+		for _, rr := range msg.Answer {
+			drr := &dnsRR{
+				Rrname: rr.Header().Name,
+				Rrtype: rr.Header().Rrtype,
+				Rdata:  "bla",
+				Ttl:    rr.Header().Ttl,
+			}
+			b, err := json.Marshal(drr)
+			if err != nil {
+				o.logger.Printf("Failed to convert dnsRR to json.")
+			} else {
+				//o.logger.Printf(rr.String())
+				o.logger.Printf(string(b))
+			}
+		}
+
+		// err := o.kafkaWriter.WriteMessages(o.ctx, kafka.Message{
+		// 	Value: buf,
+		// })
+		// if err != nil {
+		// 	panic("could not write message " + err.Error())
+		// }
+
 		// log a confirmation once the message is written
-		o.logger.Printf("kafkaOutput: Wrote message.")
+		//o.logger.Printf("kafkaOutput: Wrote message.")
 	}
 }
 
 func (o *kafkaOutput) Close() {
-
+	if err := o.kafkaWriter.Close(); err != nil {
+		o.logger.Printf("failed to close writer:", err)
+	}
 }
 
 func main() {
