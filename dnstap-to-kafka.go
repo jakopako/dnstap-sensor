@@ -2,38 +2,32 @@ package main
 
 import (
 	"bufio"
-	"context"
 	"encoding/json"
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"sync"
 
 	dnstap "github.com/dnstap/golang-dnstap"
 	proto "github.com/golang/protobuf/proto"
 	"github.com/miekg/dns"
-	kafka "github.com/segmentio/kafka-go"
+
+	"gopkg.in/confluentinc/confluent-kafka-go.v1/kafka"
 )
 
 const (
-	socketPath = "/usr/local/var/dnstap/dnstap.sock"
-	// Output channel buffer size value from main dnstap package.
+	socketPath        = "/usr/local/var/dnstap/dnstap.sock"
 	outputChannelSize = 32
-	// Kafka topic and brokers.
-	topic          = "dns-message-log"
-	broker1Address = "localhost:9091"
-	broker2Address = "localhost:9092"
-	broker3Address = "localhost:9093"
 )
 
 var logger = log.New(os.Stderr, "", log.LstdFlags)
 
 type kafkaOutput struct {
-	kafkaWriter   *kafka.Writer
-	format        dnstap.TextFormatFunc
+	kafkaWriter   *kafka.Producer
 	outputChannel chan []byte
+	topic         string
 	logger        dnstap.Logger
-	ctx           context.Context
 }
 
 type dnsRR struct {
@@ -41,23 +35,18 @@ type dnsRR struct {
 	Rrtype    uint16
 	Rdata     string
 	Ttl       uint32
-	Timestamp uint64
+	Timestamp *uint64
 }
 
-func newKafkaOutput(brokers []string, topic string, formatter dnstap.TextFormatFunc) *kafkaOutput {
-	kw := kafka.NewWriter(kafka.WriterConfig{
-		Brokers: brokers,
-		Topic:   topic,
-		// RequiredAcks: 0,
-		// BatchSize:    10,
-		// BatchTimeout: 2 * time.Second,
-		Logger: logger,
-	})
+func newKafkaOutput(topic string) *kafkaOutput {
+	kw, err := kafka.NewProducer(&kafka.ConfigMap{"bootstrap.servers": "localhost"})
+	if err != nil {
+		panic(err)
+	}
 	return &kafkaOutput{
 		kafkaWriter:   kw,
 		outputChannel: make(chan []byte, outputChannelSize),
-		format:        formatter,
-		ctx:           context.Background(),
+		topic:         topic,
 		logger:        logger,
 	}
 }
@@ -75,55 +64,43 @@ func (o *kafkaOutput) RunOutputLoop() {
 			o.logger.Printf("kafkaOutput: proto.Unmarshal() failed: %s, returning", err)
 			break
 		}
-		// buf, ok := o.format(dt)
-		// if !ok {
-		// 	o.logger.Printf("kafkaOutput: text format function failed, returning")
-		// 	break
-		// }
-		// s := string(buf)
-		// o.logger.Printf("%s", s)
 		msg := new(dns.Msg)
 		if err := msg.Unpack(dt.Message.ResponseMessage); err != nil {
 			o.logger.Printf("parse failed: %v", err)
 		}
 
-		//o.logger.Printf("%s", msg.String())
 		for _, rr := range msg.Answer {
 			drr := &dnsRR{
 				Rrname: rr.Header().Name,
 				Rrtype: rr.Header().Rrtype,
-				Rdata:  "bla",
-				Ttl:    rr.Header().Ttl,
+				// a bit ugly but I haven't found a way to generically extract the rdata
+				// since every type has its own differently named fields, see
+				// https://github.com/miekg/dns/blob/master/types.go
+				Rdata:     strings.Split(rr.String(), "\t")[4],
+				Ttl:       rr.Header().Ttl,
+				Timestamp: dt.Message.ResponseTimeSec,
 			}
 			b, err := json.Marshal(drr)
 			if err != nil {
 				o.logger.Printf("Failed to convert dnsRR to json.")
-			} else {
-				//o.logger.Printf(rr.String())
-				o.logger.Printf(string(b))
+				continue
 			}
+
+			o.kafkaWriter.Produce(&kafka.Message{
+				TopicPartition: kafka.TopicPartition{Topic: &o.topic, Partition: kafka.PartitionAny},
+				Value:          b,
+			}, nil)
+			o.logger.Printf("kafkaOutput: Wrote message with rrname %s", drr.Rrname)
 		}
-
-		// err := o.kafkaWriter.WriteMessages(o.ctx, kafka.Message{
-		// 	Value: buf,
-		// })
-		// if err != nil {
-		// 	panic("could not write message " + err.Error())
-		// }
-
-		// log a confirmation once the message is written
-		//o.logger.Printf("kafkaOutput: Wrote message.")
 	}
 }
 
 func (o *kafkaOutput) Close() {
-	if err := o.kafkaWriter.Close(); err != nil {
-		o.logger.Printf("failed to close writer:", err)
-	}
+	o.kafkaWriter.Close()
 }
 
 func main() {
-	o := newKafkaOutput([]string{broker1Address, broker2Address, broker3Address}, topic, dnstap.JSONFormat)
+	o := newKafkaOutput("dns_message_log")
 	go o.RunOutputLoop()
 	var iwg sync.WaitGroup
 	i, err := dnstap.NewFrameStreamSockInputFromPath(socketPath)
