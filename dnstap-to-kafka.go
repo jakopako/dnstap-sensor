@@ -14,7 +14,7 @@ import (
 	proto "github.com/golang/protobuf/proto"
 	"github.com/miekg/dns"
 
-	"gopkg.in/confluentinc/confluent-kafka-go.v1/kafka"
+	"github.com/confluentinc/confluent-kafka-go/kafka"
 )
 
 const (
