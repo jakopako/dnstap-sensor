@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
 	"strings"
 	"sync"
 
@@ -39,7 +40,7 @@ type dnsRR struct {
 }
 
 func newKafkaOutput(topic string) *kafkaOutput {
-	kw, err := kafka.NewProducer(&kafka.ConfigMap{"bootstrap.servers": "localhost"})
+	kw, err := kafka.NewProducer(&kafka.ConfigMap{"bootstrap.servers": "red.dhondtdoit.ch"})
 	if err != nil {
 		panic(err)
 	}
@@ -100,6 +101,15 @@ func (o *kafkaOutput) Close() {
 }
 
 func main() {
+	// signal stuff from here: https://fabianlee.org/2017/05/21/golang-running-a-go-binary-as-a-systemd-service-on-ubuntu-16-04/
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs)
+	go func() {
+		s := <-sigs
+		logger.Printf("received signal: %s", s)
+		// some cleanup to do?
+		os.Exit(1)
+	}()
 	o := newKafkaOutput("dns_message_log")
 	go o.RunOutputLoop()
 	var iwg sync.WaitGroup
