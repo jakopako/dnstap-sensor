@@ -58,6 +58,14 @@ func (o *kafkaOutput) GetOutputChannel() chan []byte {
 }
 
 func (o *kafkaOutput) RunOutputLoop() {
+	// This loop should be more elaborated in order to reduce the
+	// risk of storing wrong answer sections which could lead to
+	// a cache (or topic or whatever) poisoning effect.
+	// Therefore RESOLVER_QUERY as well as RESOLVER_RESPONSE should
+	// be looked into and the answer section of a RESOLVER_RESPONSE
+	// should only be stored if there is a corresponding
+	// RESOLVER_QUERY with a matching query id, a matching question
+	// section and a matching name in the answer section.
 	dt := &dnstap.Dnstap{}
 	f := bufio.NewWriter(os.Stdout)
 	defer f.Flush()
@@ -116,6 +124,8 @@ func main() {
 		// some cleanup to do?
 		os.Exit(1)
 	}()
+	d := newDNSQueryBuffer(10)
+	d.run()
 	o := newKafkaOutput(*kafkaTopic, *kafkaBootstrapServer)
 	go o.RunOutputLoop()
 	var iwg sync.WaitGroup
