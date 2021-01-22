@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"log"
 	"os"
@@ -18,7 +19,7 @@ import (
 )
 
 const (
-	socketPath        = "/usr/local/var/dnstap/dnstap.sock"
+	//	socketPath        = "/usr/local/var/dnstap/dnstap.sock"
 	outputChannelSize = 32
 )
 
@@ -39,8 +40,8 @@ type dnsRR struct {
 	Timestamp *uint64
 }
 
-func newKafkaOutput(topic string) *kafkaOutput {
-	kw, err := kafka.NewProducer(&kafka.ConfigMap{"bootstrap.servers": "red.dhondtdoit.ch"})
+func newKafkaOutput(topic string, brokers string) *kafkaOutput {
+	kw, err := kafka.NewProducer(&kafka.ConfigMap{"bootstrap.servers": brokers})
 	if err != nil {
 		panic(err)
 	}
@@ -101,6 +102,11 @@ func (o *kafkaOutput) Close() {
 }
 
 func main() {
+	// Read command line args
+	socketPath := flag.String("s", "/var/named/dnstap/dnstap.sock", "The socket where the dnstap data is send.")
+	kafkaBootstrapServer := flag.String("b", "localhost", "The bootstrap server for kafka.")
+	kafkaTopic := flag.String("t", "dns_message_log", "The topic to which the messages are send.")
+	flag.Parse()
 	// signal stuff from here: https://fabianlee.org/2017/05/21/golang-running-a-go-binary-as-a-systemd-service-on-ubuntu-16-04/
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs)
@@ -110,12 +116,12 @@ func main() {
 		// some cleanup to do?
 		os.Exit(1)
 	}()
-	o := newKafkaOutput("dns_message_log")
+	o := newKafkaOutput(*kafkaTopic, *kafkaBootstrapServer)
 	go o.RunOutputLoop()
 	var iwg sync.WaitGroup
-	i, err := dnstap.NewFrameStreamSockInputFromPath(socketPath)
+	i, err := dnstap.NewFrameStreamSockInputFromPath(*socketPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "dnstap: Failed to open input socket %s: %v\n", socketPath, err)
+		fmt.Fprintf(os.Stderr, "dnstap: Failed to open input socket %s: %v\n", *socketPath, err)
 		os.Exit(1)
 	}
 	i.SetTimeout(0)
