@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 const (
 	queryID    uint16 = 1
@@ -80,5 +83,21 @@ func TestMoveCurrentBucketPointer2(t *testing.T) {
 	}
 	if db.isInBuffer(queryID, queryPort, qname, qtype) {
 		t.Errorf("Query is still in buffer but should not be anymore.")
+	}
+}
+
+func TestRunAndStop(t *testing.T) {
+	db := newDNSQueryBuffer(5)
+	db.start()
+	if !db.running {
+		t.Errorf("DNSQueryBuffer should be running.")
+	}
+	time.Sleep(3 * time.Second)
+	if !db.running {
+		t.Errorf("DNSQueryBuffer should be running.")
+	}
+	db.stop()
+	if db.running {
+		t.Errorf("DNSQueryBuffer should not be running anymore.")
 	}
 }

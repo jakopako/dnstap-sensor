@@ -3,12 +3,15 @@ package main
 import (
 	"crypto/sha256"
 	"strconv"
+	"time"
 )
 
 // DNSQueryBuffer buffers DNS queries.
 type DNSQueryBuffer struct {
 	buckets              []map[[sha256.Size]byte]bool // The buckets contain a set of hashes. (https://yourbasic.org/golang/implement-set/)
 	currentBucketPointer int                          // The bucket where the hashes are currently written to.
+	quit                 chan bool
+	running              bool
 }
 
 func newDNSQueryBuffer(windowSize int) *DNSQueryBuffer {
@@ -19,6 +22,8 @@ func newDNSQueryBuffer(windowSize int) *DNSQueryBuffer {
 	return &DNSQueryBuffer{
 		buckets:              b,
 		currentBucketPointer: 0,
+		quit:                 make(chan bool),
+		running:              false,
 	}
 }
 
@@ -32,18 +37,49 @@ func queryToHash(queryID uint16, queryPort uint32, qname string, qtype uint16) [
 
 // addQuery adds a new DNS query to the DNSQueryBuffer.
 func (db *DNSQueryBuffer) addQuery(queryID uint16, queryPort uint32, qname string, qtype uint16) {
+	// TODO: have some kind of lock that prevents adding a query while the currentBucketPointer
+	// is being moved.
 	db.buckets[db.currentBucketPointer][queryToHash(queryID, queryPort, qname, qtype)] = true
 }
 
-// run starts the sliding window mechanism where old entries
+// start starts the sliding window mechanism where old entries
 // that have not been used (i.e found through IsInBuffer) are deleted.
-func (db *DNSQueryBuffer) run() {}
+func (db *DNSQueryBuffer) start() {
+	if !db.running {
+		db.running = true
+		go db.run()
+	}
+}
+
+// stop stops the sliding window mechanism.
+func (db *DNSQueryBuffer) stop() {
+	if db.running {
+		db.quit <- true
+	}
+}
+
+func (db *DNSQueryBuffer) run() {
+	for {
+		select {
+		case <-db.quit:
+			db.running = false
+			return
+		default:
+			go db.moveCurrentBucketPointer()
+			time.Sleep(1 * time.Second)
+		}
+	}
+}
 
 // moveCurrentBucketPointer moves the currentBucketPointer by one in the negative direction
 // and clears the new current bucket's map.
 func (db *DNSQueryBuffer) moveCurrentBucketPointer() {
+	// TODO: make sure this function can only be called once.
+	//start := time.Now()
 	db.currentBucketPointer = (db.currentBucketPointer - 1 + len(db.buckets)) % len(db.buckets)
 	db.buckets[db.currentBucketPointer] = make(map[[sha256.Size]byte]bool)
+	//elapsed := time.Since(start)
+	//log.Printf("Moving pointer took %s", elapsed)
 }
 
 // isInBuffer checks whether the specified combination of a, b, c
