@@ -10,7 +10,7 @@ import (
 type DNSQueryBuffer struct {
 	buckets              []map[[sha256.Size]byte]bool // The buckets contain a set of hashes. (https://yourbasic.org/golang/implement-set/)
 	currentBucketPointer int                          // The bucket where the hashes are currently written to.
-	quit                 chan bool
+	signalStop           chan bool
 	running              bool
 }
 
@@ -22,7 +22,7 @@ func newDNSQueryBuffer(windowSize int) *DNSQueryBuffer {
 	return &DNSQueryBuffer{
 		buckets:              b,
 		currentBucketPointer: 0,
-		quit:                 make(chan bool),
+		signalStop:           make(chan bool),
 		running:              false,
 	}
 }
@@ -39,6 +39,7 @@ func queryToHash(queryID uint16, queryPort uint32, qname string, qtype uint16) [
 func (db *DNSQueryBuffer) addQuery(queryID uint16, queryPort uint32, qname string, qtype uint16) {
 	// TODO: have some kind of lock that prevents adding a query while the currentBucketPointer
 	// is being moved.
+	// fmt.Printf("Added %d %d %s %d\n", queryID, queryPort, qname, qtype)
 	db.buckets[db.currentBucketPointer][queryToHash(queryID, queryPort, qname, qtype)] = true
 }
 
@@ -54,14 +55,14 @@ func (db *DNSQueryBuffer) start() {
 // stop stops the sliding window mechanism.
 func (db *DNSQueryBuffer) stop() {
 	if db.running {
-		db.quit <- true
+		db.signalStop <- true
 	}
 }
 
 func (db *DNSQueryBuffer) run() {
 	for {
 		select {
-		case <-db.quit:
+		case <-db.signalStop:
 			db.running = false
 			return
 		default:
@@ -75,7 +76,7 @@ func (db *DNSQueryBuffer) run() {
 // and clears the new current bucket's map.
 func (db *DNSQueryBuffer) moveCurrentBucketPointer() {
 	// TODO: make sure this function can only be called once.
-	//start := time.Now()
+	// start := time.Now()
 	// First delete the oldest bucket
 	oldestBucketPointer := (db.currentBucketPointer - 1 + len(db.buckets)) % len(db.buckets)
 	db.buckets[oldestBucketPointer] = make(map[[sha256.Size]byte]bool)
@@ -83,20 +84,25 @@ func (db *DNSQueryBuffer) moveCurrentBucketPointer() {
 	// What happens when a query is written to the DNSQueryBuffer (by addQuery) the exact
 	// same moment when the pointer is updated?
 	db.currentBucketPointer = oldestBucketPointer
-	//elapsed := time.Since(start)
-	//log.Printf("Moving pointer took %s", elapsed)
+	// elapsed := time.Since(start)
+	// log.Printf("Moving pointer took %s", elapsed)
 }
 
 // isInBuffer checks whether the specified combination of a, b, c
 // is in the buffer and if so deletes this specific entry.
 func (db *DNSQueryBuffer) isInBuffer(queryID uint16, queryPort uint32, qname string, qtype uint16) bool {
+	// start := time.Now()
 	h := queryToHash(queryID, queryPort, qname, qtype)
 	for i := db.currentBucketPointer; i < db.currentBucketPointer+len(db.buckets); i++ {
 		j := i % len(db.buckets)
 		if _, ok := db.buckets[j][h]; ok {
 			delete(db.buckets[j], h)
+			// elapsed := time.Since(start)
+			// log.Printf("Took %s to find query", elapsed)
 			return true
 		}
 	}
+	// elapsed := time.Since(start)
+	// log.Printf("Took %s not to find query", elapsed)
 	return false
 }

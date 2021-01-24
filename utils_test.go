@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strconv"
 	"testing"
 	"time"
 )
@@ -103,9 +104,57 @@ func TestRunAndStop(t *testing.T) {
 }
 
 func TestRunStillInBuffer(t *testing.T) {
-
+	db := newDNSQueryBuffer(5)
+	db.start()
+	time.Sleep(500 * time.Millisecond)
+	db.addQuery(queryID, queryPort, qname, qtype)
+	time.Sleep(3 * time.Second)
+	if !db.isInBuffer(queryID, queryPort, qname, qtype) {
+		t.Errorf("Query should still be in the buffer.")
+	}
+	db.stop()
 }
 
 func TestRunNotInBufferAnymore(t *testing.T) {
+	db := newDNSQueryBuffer(5)
+	db.start()
+	time.Sleep(500 * time.Millisecond)
+	db.addQuery(queryID, queryPort, qname, qtype)
+	time.Sleep(5 * time.Second)
+	if db.isInBuffer(queryID, queryPort, qname, qtype) {
+		t.Errorf("Query shouldn't be in the buffer anymore.")
+	}
+	db.stop()
+}
 
+func BenchmarkAddQuery(b *testing.B) {
+	db := newDNSQueryBuffer(5)
+	db.start()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		db.addQuery(queryID, queryPort, strconv.Itoa(i), qtype)
+	}
+}
+
+func BenchmarkIsInBuffer(b *testing.B) {
+	db := newDNSQueryBuffer(5)
+	db.start()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if db.isInBuffer(queryID, queryPort, qname, qtype) {
+			b.Errorf("Query should not be in buffer.")
+		}
+	}
+}
+
+func BenchmarkAddQueryIsInBuffer(b *testing.B) {
+	db := newDNSQueryBuffer(5)
+	db.start()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		db.addQuery(queryID, queryPort, strconv.Itoa(i), qtype)
+		if !db.isInBuffer(queryID, queryPort, strconv.Itoa(i), qtype) {
+			b.Errorf("Query should be in buffer.")
+		}
+	}
 }

@@ -67,6 +67,9 @@ func (o *kafkaOutput) RunOutputLoop() {
 	// RESOLVER_QUERY with a matching query id, a matching question
 	// section and a matching name in the answer section.
 	dt := &dnstap.Dnstap{}
+	d := newDNSQueryBuffer(10)
+	d.start()
+	defer d.stop()
 	f := bufio.NewWriter(os.Stdout)
 	defer f.Flush()
 	for frame := range o.outputChannel {
@@ -75,32 +78,47 @@ func (o *kafkaOutput) RunOutputLoop() {
 			break
 		}
 		msg := new(dns.Msg)
-		if err := msg.Unpack(dt.Message.ResponseMessage); err != nil {
-			o.logger.Printf("parse failed: %v", err)
-		}
-
-		for _, rr := range msg.Answer {
-			drr := &dnsRR{
-				Rrname: rr.Header().Name,
-				Rrtype: rr.Header().Rrtype,
-				// a bit ugly but I haven't found a way to generically extract the rdata
-				// since every type has its own differently named fields, see
-				// https://github.com/miekg/dns/blob/master/types.go
-				Rdata:     strings.Split(rr.String(), "\t")[4],
-				Ttl:       rr.Header().Ttl,
-				Timestamp: dt.Message.ResponseTimeSec,
+		// TODO: make qname lowercase wherever necessary.
+		if dt.Message.GetType() == dnstap.Message_RESOLVER_RESPONSE {
+			if err := msg.Unpack(dt.Message.ResponseMessage); err != nil {
+				o.logger.Printf("parse failed: %v", err)
 			}
-			b, err := json.Marshal(drr)
-			if err != nil {
-				o.logger.Printf("Failed to convert dnsRR to json.")
-				continue
-			}
+			if d.isInBuffer(msg.Id, dt.Message.GetQueryPort(), msg.Question[0].Name, msg.Question[0].Qtype) {
+				for _, rr := range msg.Answer {
+					drr := &dnsRR{
+						Rrname: rr.Header().Name,
+						Rrtype: rr.Header().Rrtype,
+						// a bit ugly but I haven't found a way to generically extract the rdata
+						// since every type has its own differently named fields, see
+						// https://github.com/miekg/dns/blob/master/types.go
+						Rdata:     strings.Split(rr.String(), "\t")[4],
+						Ttl:       rr.Header().Ttl,
+						Timestamp: dt.Message.ResponseTimeSec,
+					}
+					if drr.Rrname == msg.Question[0].Name {
+						b, err := json.Marshal(drr)
+						if err != nil {
+							o.logger.Printf("Failed to convert dnsRR to json.")
+							continue
+						}
 
-			o.kafkaWriter.Produce(&kafka.Message{
-				TopicPartition: kafka.TopicPartition{Topic: &o.topic, Partition: kafka.PartitionAny},
-				Value:          b,
-			}, nil)
-			o.logger.Printf("kafkaOutput: Wrote message with rrname %s", drr.Rrname)
+						o.kafkaWriter.Produce(&kafka.Message{
+							TopicPartition: kafka.TopicPartition{Topic: &o.topic, Partition: kafka.PartitionAny},
+							Value:          b,
+						}, nil)
+						o.logger.Printf("kafkaOutput: Wrote message with rrname %s and rrtype %d", drr.Rrname, drr.Rrtype)
+					} else {
+						o.logger.Printf("Name of question %s section did not match name %s of answer section.", msg.Question[0].Name, drr.Rrname)
+					}
+				}
+			} else {
+				o.logger.Printf("Did not find %s %d in buffer.", msg.Question[0].Name, msg.Question[0].Qtype)
+			}
+		} else if dt.Message.GetType() == dnstap.Message_RESOLVER_QUERY {
+			if err := msg.Unpack(dt.Message.QueryMessage); err != nil {
+				o.logger.Printf("parse failed: %v", err)
+			}
+			d.addQuery(msg.Id, dt.Message.GetQueryPort(), msg.Question[0].Name, msg.Question[0].Qtype)
 		}
 	}
 }
@@ -124,8 +142,6 @@ func main() {
 		// some cleanup to do?
 		os.Exit(1)
 	}()
-	d := newDNSQueryBuffer(10)
-	d.run()
 	o := newKafkaOutput(*kafkaTopic, *kafkaBootstrapServer)
 	go o.RunOutputLoop()
 	var iwg sync.WaitGroup
