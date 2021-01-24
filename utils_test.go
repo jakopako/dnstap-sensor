@@ -101,3 +101,11 @@ func TestRunAndStop(t *testing.T) {
 		t.Errorf("DNSQueryBuffer should not be running anymore.")
 	}
 }
+
+func TestRunStillInBuffer(t *testing.T) {
+
+}
+
+func TestRunNotInBufferAnymore(t *testing.T) {
+
+}

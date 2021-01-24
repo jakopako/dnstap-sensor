@@ -76,8 +76,13 @@ func (db *DNSQueryBuffer) run() {
 func (db *DNSQueryBuffer) moveCurrentBucketPointer() {
 	// TODO: make sure this function can only be called once.
 	//start := time.Now()
-	db.currentBucketPointer = (db.currentBucketPointer - 1 + len(db.buckets)) % len(db.buckets)
-	db.buckets[db.currentBucketPointer] = make(map[[sha256.Size]byte]bool)
+	// First delete the oldest bucket
+	oldestBucketPointer := (db.currentBucketPointer - 1 + len(db.buckets)) % len(db.buckets)
+	db.buckets[oldestBucketPointer] = make(map[[sha256.Size]byte]bool)
+	// Then update the currentBucketPointer. Is a lock necessary for this operation?
+	// What happens when a query is written to the DNSQueryBuffer (by addQuery) the exact
+	// same moment when the pointer is updated?
+	db.currentBucketPointer = oldestBucketPointer
 	//elapsed := time.Since(start)
 	//log.Printf("Moving pointer took %s", elapsed)
 }
