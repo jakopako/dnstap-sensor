@@ -30,6 +30,7 @@ type kafkaOutput struct {
 	outputChannel chan []byte
 	topic         string
 	logger        dnstap.Logger
+	logOnly       bool
 }
 
 type dnsRR struct {
@@ -40,7 +41,15 @@ type dnsRR struct {
 	Timestamp *uint64
 }
 
-func newKafkaOutput(topic string, brokers string) *kafkaOutput {
+func newKafkaOutput(topic string, brokers string, logOnly bool) *kafkaOutput {
+	if logOnly {
+		return &kafkaOutput{
+			outputChannel: make(chan []byte, outputChannelSize),
+			topic:         topic,
+			logger:        logger,
+			logOnly:       logOnly,
+		}
+	}
 	kw, err := kafka.NewProducer(&kafka.ConfigMap{"bootstrap.servers": brokers})
 	if err != nil {
 		panic(err)
@@ -50,6 +59,7 @@ func newKafkaOutput(topic string, brokers string) *kafkaOutput {
 		outputChannel: make(chan []byte, outputChannelSize),
 		topic:         topic,
 		logger:        logger,
+		logOnly:       logOnly,
 	}
 }
 
@@ -78,15 +88,15 @@ func (o *kafkaOutput) RunOutputLoop() {
 			break
 		}
 		msg := new(dns.Msg)
-		// TODO: make qname lowercase wherever necessary.
 		if dt.Message.GetType() == dnstap.Message_RESOLVER_RESPONSE {
 			if err := msg.Unpack(dt.Message.ResponseMessage); err != nil {
 				o.logger.Printf("parse failed: %v", err)
 			}
-			if d.isInBuffer(msg.Id, dt.Message.GetQueryPort(), msg.Question[0].Name, msg.Question[0].Qtype) {
+			qname := strings.ToLower(msg.Question[0].Name)
+			if d.isInBuffer(msg.Id, dt.Message.GetQueryPort(), qname, msg.Question[0].Qtype) {
 				for _, rr := range msg.Answer {
 					drr := &dnsRR{
-						Rrname: rr.Header().Name,
+						Rrname: strings.ToLower(rr.Header().Name),
 						Rrtype: rr.Header().Rrtype,
 						// a bit ugly but I haven't found a way to generically extract the rdata
 						// since every type has its own differently named fields, see
@@ -95,18 +105,20 @@ func (o *kafkaOutput) RunOutputLoop() {
 						Ttl:       rr.Header().Ttl,
 						Timestamp: dt.Message.ResponseTimeSec,
 					}
-					if drr.Rrname == msg.Question[0].Name {
+					if drr.Rrname == qname {
 						b, err := json.Marshal(drr)
 						if err != nil {
 							o.logger.Printf("Failed to convert dnsRR to json.")
 							continue
 						}
-
-						o.kafkaWriter.Produce(&kafka.Message{
-							TopicPartition: kafka.TopicPartition{Topic: &o.topic, Partition: kafka.PartitionAny},
-							Value:          b,
-						}, nil)
-						o.logger.Printf("kafkaOutput: Wrote message with rrname %s and rrtype %d", drr.Rrname, drr.Rrtype)
+						if o.logOnly {
+							o.logger.Printf("Message: %s", b)
+						} else {
+							o.kafkaWriter.Produce(&kafka.Message{
+								TopicPartition: kafka.TopicPartition{Topic: &o.topic, Partition: kafka.PartitionAny},
+								Value:          b,
+							}, nil)
+						}
 					} else {
 						o.logger.Printf("Name of question %s section did not match name %s of answer section.", msg.Question[0].Name, drr.Rrname)
 					}
@@ -118,7 +130,7 @@ func (o *kafkaOutput) RunOutputLoop() {
 			if err := msg.Unpack(dt.Message.QueryMessage); err != nil {
 				o.logger.Printf("parse failed: %v", err)
 			}
-			d.addQuery(msg.Id, dt.Message.GetQueryPort(), msg.Question[0].Name, msg.Question[0].Qtype)
+			d.addQuery(msg.Id, dt.Message.GetQueryPort(), strings.ToLower(msg.Question[0].Name), msg.Question[0].Qtype)
 		}
 	}
 }
@@ -132,6 +144,7 @@ func main() {
 	socketPath := flag.String("s", "/var/named/dnstap/dnstap.sock", "The socket where the dnstap data is send.")
 	kafkaBootstrapServer := flag.String("b", "localhost", "The bootstrap server for kafka.")
 	kafkaTopic := flag.String("t", "dns_message_log", "The topic to which the messages are send.")
+	logOnly := flag.Bool("l", false, "A flag that determines whether the queries should only be logged or not.")
 	flag.Parse()
 	// signal stuff from here: https://fabianlee.org/2017/05/21/golang-running-a-go-binary-as-a-systemd-service-on-ubuntu-16-04/
 	sigs := make(chan os.Signal, 1)
@@ -142,7 +155,7 @@ func main() {
 		// some cleanup to do?
 		os.Exit(1)
 	}()
-	o := newKafkaOutput(*kafkaTopic, *kafkaBootstrapServer)
+	o := newKafkaOutput(*kafkaTopic, *kafkaBootstrapServer, *logOnly)
 	go o.RunOutputLoop()
 	var iwg sync.WaitGroup
 	i, err := dnstap.NewFrameStreamSockInputFromPath(*socketPath)
