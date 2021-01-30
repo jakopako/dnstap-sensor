@@ -23,7 +23,7 @@ const (
 	outputChannelSize = 32
 )
 
-var logger = log.New(os.Stderr, "", log.LstdFlags)
+var logger = log.New(os.Stdout, "", log.LstdFlags)
 
 type kafkaOutput struct {
 	kafkaWriter   *kafka.Producer
