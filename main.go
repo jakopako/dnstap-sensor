@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"encoding/json"
 	"flag"
-	"fmt"
 	"log"
 	"os"
 	"os/signal"
@@ -132,6 +131,7 @@ func (o *kafkaOutput) Close() {
 }
 
 func main() {
+	logger.Printf("Starting dnstap-sensor.")
 	// Read command line args
 	socketPath := flag.String("s", "/var/named/dnstap/dnstap.sock", "The socket where the dnstap data is send.")
 	kafkaBootstrapServer := flag.String("b", "localhost", "The bootstrap server for kafka.")
@@ -152,7 +152,7 @@ func main() {
 	var iwg sync.WaitGroup
 	i, err := dnstap.NewFrameStreamSockInputFromPath(*socketPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "dnstap: Failed to open input socket %s: %v\n", *socketPath, err)
+		logger.Printf("dnstap: Failed to open input socket %s: %v\n", *socketPath, err)
 		os.Exit(1)
 	}
 	i.SetTimeout(0)
