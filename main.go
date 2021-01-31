@@ -85,7 +85,7 @@ func (o *kafkaOutput) RunOutputLoop() {
 			}
 			qname := strings.ToLower(msg.Question[0].Name)
 			if d.isInBuffer(msg.Id, dt.Message.GetQueryPort(), qname, msg.Question[0].Qtype) {
-				for _, rr := range msg.Answer {
+				for i, rr := range msg.Answer {
 					drr := &dnsRR{
 						Rrname: strings.ToLower(rr.Header().Name),
 						Rrtype: rr.Header().Rrtype,
@@ -96,7 +96,10 @@ func (o *kafkaOutput) RunOutputLoop() {
 						Ttl:       rr.Header().Ttl,
 						Timestamp: dt.Message.ResponseTimeSec,
 					}
-					if drr.Rrname == qname {
+					if drr.Rrname != qname && i == 0 {
+						o.logger.Printf("Name of question %s section did not match name %s of answer section.", msg.Question[0].Name, drr.Rrname)
+						break
+					} else {
 						b, err := json.Marshal(drr)
 						if err != nil {
 							o.logger.Printf("Failed to convert dnsRR to json.")
@@ -110,8 +113,6 @@ func (o *kafkaOutput) RunOutputLoop() {
 								Value:          b,
 							}, nil)
 						}
-					} else {
-						o.logger.Printf("Name of question %s section did not match name %s of answer section.", msg.Question[0].Name, drr.Rrname)
 					}
 				}
 			} else {
