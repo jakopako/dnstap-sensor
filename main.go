@@ -19,7 +19,6 @@ import (
 )
 
 const (
-	//	socketPath        = "/usr/local/var/dnstap/dnstap.sock"
 	outputChannelSize = 32
 )
 
@@ -116,7 +115,7 @@ func (o *kafkaOutput) RunOutputLoop() {
 							}
 							o.packetCount++
 							if o.logOnly {
-								//o.logger.Printf("Message: %s", b)
+								o.logger.Printf("Message: %s", b)
 							} else {
 								o.kafkaWriter.Produce(&kafka.Message{
 									TopicPartition: kafka.TopicPartition{Topic: &o.topic, Partition: kafka.PartitionAny},
@@ -148,40 +147,57 @@ func (o *kafkaOutput) Close() {
 
 func main() {
 	logger.Printf("Starting dnstap-sensor.")
+	start := time.Now()
 	// Read command line args
 	socketPath := flag.String("s", "/var/named/dnstap/dnstap.sock", "The socket where the dnstap data is send.")
 	kafkaBootstrapServer := flag.String("b", "localhost", "The bootstrap server for kafka.")
 	kafkaTopic := flag.String("t", "dns_message_log", "The topic to which the messages are send.")
 	logOnly := flag.Bool("l", false, "A flag that determines whether the queries should only be logged or not.")
 	responseOnly := flag.Bool("r", false, "A flag that determines whether to take the resolver query into account and do query/response matching or not.")
+	filePath := flag.String("f", "", "If dnstap data should be read from a file this is the file's path.")
 	flag.Parse()
+
+	o := newKafkaOutput(*kafkaTopic, *kafkaBootstrapServer, *logOnly, *responseOnly)
+	go o.RunOutputLoop()
 	// signal stuff from here: https://fabianlee.org/2017/05/21/golang-running-a-go-binary-as-a-systemd-service-on-ubuntu-16-04/
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs)
 	go func() {
 		s := <-sigs
 		logger.Printf("received signal: %s", s)
-		// some cleanup to do?
+		elapsed := time.Since(start)
+		o.Close()
+		logger.Printf("Up time: %s", elapsed)
 		os.Exit(1)
 	}()
-	o := newKafkaOutput(*kafkaTopic, *kafkaBootstrapServer, *logOnly, *responseOnly)
-	go o.RunOutputLoop()
 	var iwg sync.WaitGroup
-	//i, err := dnstap.NewFrameStreamSockInputFromPath(*socketPath)
-	start := time.Now()
-	i, err := dnstap.NewFrameStreamInputFromFilename("/home/ubuntu/Downloads/20210307154001.kirby.switch.ch.w_query")
-	if err != nil {
-		logger.Printf("dnstap: Failed to open input socket %s: %v\n", *socketPath, err)
-		os.Exit(1)
+	if len(*filePath) > 0 {
+		// "/home/ubuntu/Downloads/20210307154001.kirby.switch.ch.w_query"
+		i, err := dnstap.NewFrameStreamInputFromFilename(*filePath)
+		if err != nil {
+			logger.Printf("Failed to open file %s: %v\n", *filePath, err)
+			os.Exit(1)
+		}
+		i.SetLogger(logger)
+		iwg.Add(1)
+		go runInput(i, o, &iwg)
+		iwg.Wait()
+	} else {
+		i, err := dnstap.NewFrameStreamSockInputFromPath(*socketPath)
+		if err != nil {
+			logger.Printf("Failed to open input socket %s: %v\n", *socketPath, err)
+			os.Exit(1)
+		}
+		i.SetTimeout(0)
+		i.SetLogger(logger)
+		iwg.Add(1)
+		go runInput(i, o, &iwg)
+		iwg.Wait()
 	}
-	//i.SetTimeout(0)
-	i.SetLogger(logger)
-	iwg.Add(1)
-	go runInput(i, o, &iwg)
-	iwg.Wait()
+
 	elapsed := time.Since(start)
 	o.Close()
-	logger.Printf("Processing took %s", elapsed)
+	logger.Printf("Up time: %s", elapsed)
 }
 
 func runInput(i dnstap.Input, o dnstap.Output, wg *sync.WaitGroup) {
