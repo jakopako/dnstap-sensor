@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"strings"
 	"sync"
+	"time"
 
 	dnstap "github.com/dnstap/golang-dnstap"
 	proto "github.com/golang/protobuf/proto"
@@ -30,6 +31,8 @@ type kafkaOutput struct {
 	topic         string
 	logger        dnstap.Logger
 	logOnly       bool
+	responseOnly  bool
+	packetCount   int
 }
 
 type dnsRR struct {
@@ -40,13 +43,15 @@ type dnsRR struct {
 	Timestamp *uint64
 }
 
-func newKafkaOutput(topic string, brokers string, logOnly bool) *kafkaOutput {
+func newKafkaOutput(topic string, brokers string, logOnly bool, responseOnly bool) *kafkaOutput {
 	if logOnly {
 		return &kafkaOutput{
 			outputChannel: make(chan []byte, outputChannelSize),
 			topic:         topic,
 			logger:        logger,
 			logOnly:       logOnly,
+			responseOnly:  responseOnly,
+			packetCount:   0,
 		}
 	}
 	kw, err := kafka.NewProducer(&kafka.ConfigMap{"bootstrap.servers": brokers})
@@ -59,6 +64,8 @@ func newKafkaOutput(topic string, brokers string, logOnly bool) *kafkaOutput {
 		topic:         topic,
 		logger:        logger,
 		logOnly:       logOnly,
+		responseOnly:  responseOnly,
+		packetCount:   0,
 	}
 }
 
@@ -83,42 +90,46 @@ func (o *kafkaOutput) RunOutputLoop() {
 			if err := msg.Unpack(dt.Message.ResponseMessage); err != nil {
 				o.logger.Printf("parse failed: %v", err)
 			}
-			qname := strings.ToLower(msg.Question[0].Name)
-			if d.isInBuffer(msg.Id, dt.Message.GetQueryPort(), qname, msg.Question[0].Qtype) {
-				for i, rr := range msg.Answer {
-					drr := &dnsRR{
-						Rrname: strings.ToLower(rr.Header().Name),
-						Rrtype: rr.Header().Rrtype,
-						// a bit ugly but I haven't found a way to generically extract the rdata
-						// since every type has its own differently named fields, see
-						// https://github.com/miekg/dns/blob/master/types.go
-						Rdata:     strings.Split(rr.String(), "\t")[4],
-						Ttl:       rr.Header().Ttl,
-						Timestamp: dt.Message.ResponseTimeSec,
-					}
-					if drr.Rrname != qname && i == 0 {
-						o.logger.Printf("Name of question %s section did not match name %s of answer section.", msg.Question[0].Name, drr.Rrname)
-						break
-					} else {
-						b, err := json.Marshal(drr)
-						if err != nil {
-							o.logger.Printf("Failed to convert dnsRR to json.")
-							continue
+			if len(msg.Question) > 0 {
+				// We ignore broken packets with no question section.
+				qname := strings.ToLower(msg.Question[0].Name)
+				if o.responseOnly || d.isInBuffer(msg.Id, dt.Message.GetQueryPort(), qname, msg.Question[0].Qtype) {
+					for i, rr := range msg.Answer {
+						drr := &dnsRR{
+							Rrname: strings.ToLower(rr.Header().Name),
+							Rrtype: rr.Header().Rrtype,
+							// a bit ugly but I haven't found a way to generically extract the rdata
+							// since every type has its own differently named fields, see
+							// https://github.com/miekg/dns/blob/master/types.go
+							Rdata:     strings.Split(rr.String(), "\t")[4],
+							Ttl:       rr.Header().Ttl,
+							Timestamp: dt.Message.ResponseTimeSec,
 						}
-						if o.logOnly {
-							o.logger.Printf("Message: %s", b)
+						if drr.Rrname != qname && i == 0 {
+							o.logger.Printf("Name of question %s section did not match name %s of answer section.", msg.Question[0].Name, drr.Rrname)
+							break
 						} else {
-							o.kafkaWriter.Produce(&kafka.Message{
-								TopicPartition: kafka.TopicPartition{Topic: &o.topic, Partition: kafka.PartitionAny},
-								Value:          b,
-							}, nil)
+							b, err := json.Marshal(drr)
+							if err != nil {
+								o.logger.Printf("Failed to convert dnsRR to json.")
+								continue
+							}
+							o.packetCount++
+							if o.logOnly {
+								//o.logger.Printf("Message: %s", b)
+							} else {
+								o.kafkaWriter.Produce(&kafka.Message{
+									TopicPartition: kafka.TopicPartition{Topic: &o.topic, Partition: kafka.PartitionAny},
+									Value:          b,
+								}, nil)
+							}
 						}
 					}
+				} else {
+					o.logger.Printf("Did not find %s %d in buffer.", msg.Question[0].Name, msg.Question[0].Qtype)
 				}
-			} else {
-				o.logger.Printf("Did not find %s %d in buffer.", msg.Question[0].Name, msg.Question[0].Qtype)
 			}
-		} else if dt.Message.GetType() == dnstap.Message_RESOLVER_QUERY {
+		} else if !o.responseOnly && dt.Message.GetType() == dnstap.Message_RESOLVER_QUERY {
 			if err := msg.Unpack(dt.Message.QueryMessage); err != nil {
 				o.logger.Printf("parse failed: %v", err)
 			}
@@ -128,7 +139,11 @@ func (o *kafkaOutput) RunOutputLoop() {
 }
 
 func (o *kafkaOutput) Close() {
-	o.kafkaWriter.Close()
+	if !o.logOnly {
+		o.kafkaWriter.Flush(5 * 1000)
+		o.kafkaWriter.Close()
+	}
+	o.logger.Printf("Processed %d answers", o.packetCount)
 }
 
 func main() {
@@ -138,6 +153,7 @@ func main() {
 	kafkaBootstrapServer := flag.String("b", "localhost", "The bootstrap server for kafka.")
 	kafkaTopic := flag.String("t", "dns_message_log", "The topic to which the messages are send.")
 	logOnly := flag.Bool("l", false, "A flag that determines whether the queries should only be logged or not.")
+	responseOnly := flag.Bool("r", false, "A flag that determines whether to take the resolver query into account and do query/response matching or not.")
 	flag.Parse()
 	// signal stuff from here: https://fabianlee.org/2017/05/21/golang-running-a-go-binary-as-a-systemd-service-on-ubuntu-16-04/
 	sigs := make(chan os.Signal, 1)
@@ -148,20 +164,24 @@ func main() {
 		// some cleanup to do?
 		os.Exit(1)
 	}()
-	o := newKafkaOutput(*kafkaTopic, *kafkaBootstrapServer, *logOnly)
+	o := newKafkaOutput(*kafkaTopic, *kafkaBootstrapServer, *logOnly, *responseOnly)
 	go o.RunOutputLoop()
 	var iwg sync.WaitGroup
-	i, err := dnstap.NewFrameStreamSockInputFromPath(*socketPath)
+	//i, err := dnstap.NewFrameStreamSockInputFromPath(*socketPath)
+	start := time.Now()
+	i, err := dnstap.NewFrameStreamInputFromFilename("/home/ubuntu/Downloads/20210307154001.kirby.switch.ch.w_query")
 	if err != nil {
 		logger.Printf("dnstap: Failed to open input socket %s: %v\n", *socketPath, err)
 		os.Exit(1)
 	}
-	i.SetTimeout(0)
+	//i.SetTimeout(0)
 	i.SetLogger(logger)
 	iwg.Add(1)
 	go runInput(i, o, &iwg)
 	iwg.Wait()
+	elapsed := time.Since(start)
 	o.Close()
+	logger.Printf("Processing took %s", elapsed)
 }
 
 func runInput(i dnstap.Input, o dnstap.Output, wg *sync.WaitGroup) {
